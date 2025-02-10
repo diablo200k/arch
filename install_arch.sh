@@ -23,6 +23,12 @@ VIRTUALBOX_SIZE="10G"
 SHARED_SIZE="5G"
 LUKS_SIZE="10G"
 
+# Configuration du clavier AZERTY
+loadkeys fr
+
+# Installation de l'environnement graphique
+pacman -Sy --noconfirm xorg-server xorg-xinit
+
 # Partitionnement du disque
 parted -s $DISK mklabel gpt
 parted -s $DISK mkpart primary fat32 1MiB 513MiB
@@ -70,38 +76,45 @@ pacstrap /mnt base linux linux-firmware lvm2 vim networkmanager grub efibootmgr
 genfstab -U /mnt >> /mnt/etc/fstab
 
 # Configuration du système
-arch-chroot /mnt ln -sf /usr/share/zoneinfo/Europe/Paris /etc/localtime
-arch-chroot /mnt hwclock --systohc
-echo "fr_FR.UTF-8 UTF-8" >> /mnt/etc/locale.gen
-arch-chroot /mnt locale-gen
-echo "LANG=fr_FR.UTF-8" > /mnt/etc/locale.conf
-echo "$HOSTNAME" > /mnt/etc/hostname
-echo "127.0.0.1 localhost" >> /mnt/etc/hosts
-echo "::1       localhost" >> /mnt/etc/hosts
-echo "127.0.1.1 $HOSTNAME.localdomain $HOSTNAME" >> /mnt/etc/hosts
+arch-chroot /mnt <<EOF
+ln -sf /usr/share/zoneinfo/Europe/Paris /etc/localtime
+hwclock --systohc
+echo "fr_FR.UTF-8 UTF-8" >> /etc/locale.gen
+locale-gen
+echo "LANG=fr_FR.UTF-8" > /etc/locale.conf
+echo "KEYMAP=fr" > /etc/vconsole.conf
+echo "$HOSTNAME" > /etc/hostname
+echo "127.0.0.1 localhost" >> /etc/hosts
+echo "::1       localhost" >> /etc/hosts
+echo "127.0.1.1 $HOSTNAME.localdomain $HOSTNAME" >> /etc/hosts
 
 # Configuration du bootloader
-arch-chroot /mnt grub-install --target=x86_64-efi --efi-directory=/boot --bootloader-id=GRUB
-arch-chroot /mnt grub-mkconfig -o /boot/grub/grub.cfg
+grub-install --target=x86_64-efi --efi-directory=/boot --bootloader-id=GRUB
+grub-mkconfig -o /boot/grub/grub.cfg
 
 # Configuration des utilisateurs
-arch-chroot /mnt useradd -m -G wheel -s /bin/bash $USER1
-arch-chroot /mnt useradd -m -s /bin/bash $USER2
-echo "$USER1:$PASSWORD" | arch-chroot /mnt chpasswd
-echo "$USER2:$PASSWORD" | arch-chroot /mnt chpasswd
-echo "%wheel ALL=(ALL) ALL" >> /mnt/etc/sudoers
+useradd -m -G wheel -s /bin/bash $USER1
+useradd -m -s /bin/bash $USER2
+echo "$USER1:$PASSWORD" | chpasswd
+echo "$USER2:$PASSWORD" | chpasswd
+echo "%wheel ALL=(ALL) ALL" >> /etc/sudoers
 
 # Installation des outils supplémentaires
-arch-chroot /mnt pacman -S --noconfirm virtualbox hyprland firefox gcc vim
+pacman -S --noconfirm virtualbox hyprland firefox gcc vim xfce4 lightdm lightdm-gtk-greeter
 
-# Configuration de Hyprland (optionnel)
-mkdir -p /mnt/home/$USER1/.config/hypr
-echo "exec Hyprland" > /mnt/home/$USER1/.config/hypr/hyprland.conf
+# Configuration de Hyprland
+mkdir -p /home/$USER1/.config/hypr
+echo "exec Hyprland" > /home/$USER1/.config/hypr/hyprland.conf
+
+# Activation des services
+systemctl enable NetworkManager
+systemctl enable lightdm
 
 # Configuration du volume chiffré LUKS
 echo -n "$PASSWORD" | cryptsetup luksFormat /dev/$VG_NAME/$LV_LUKS -
 echo -n "$PASSWORD" | cryptsetup open /dev/$VG_NAME/$LV_LUKS cryptluks -
 mkfs.ext4 /dev/mapper/cryptluks
+EOF
 
 # Fin de l'installation
 umount -R /mnt
