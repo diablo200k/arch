@@ -1,0 +1,109 @@
+#!/bin/bash
+
+# Variables
+DISK="/dev/sda"
+HOSTNAME="archbox"
+USER1="colleague"
+USER2="son"
+PASSWORD="azerty123"
+LUKS_PARTITION="/dev/sda2"
+LUKS_MAPPER="cryptlvm"
+VG_NAME="vg0"
+LV_ROOT="lv_root"
+LV_SWAP="lv_swap"
+LV_HOME="lv_home"
+LV_VIRTUALBOX="lv_virtualbox"
+LV_SHARED="lv_shared"
+LV_LUKS="lv_luks"
+EFI_PARTITION="/dev/sda1"
+ROOT_SIZE="40G"
+SWAP_SIZE="2G"
+HOME_SIZE="20G"
+VIRTUALBOX_SIZE="10G"
+SHARED_SIZE="5G"
+LUKS_SIZE="10G"
+
+# Partitionnement du disque
+parted -s $DISK mklabel gpt
+parted -s $DISK mkpart primary fat32 1MiB 513MiB
+parted -s $DISK set 1 esp on
+parted -s $DISK mkpart primary ext4 513MiB 100%
+
+# Chiffrement LUKS
+echo -n "$PASSWORD" | cryptsetup luksFormat $LUKS_PARTITION -
+echo -n "$PASSWORD" | cryptsetup open $LUKS_PARTITION $LUKS_MAPPER -
+
+# Configuration LVM
+pvcreate /dev/mapper/$LUKS_MAPPER
+vgcreate $VG_NAME /dev/mapper/$LUKS_MAPPER
+lvcreate -L $ROOT_SIZE -n $LV_ROOT $VG_NAME
+lvcreate -L $SWAP_SIZE -n $LV_SWAP $VG_NAME
+lvcreate -L $HOME_SIZE -n $LV_HOME $VG_NAME
+lvcreate -L $VIRTUALBOX_SIZE -n $LV_VIRTUALBOX $VG_NAME
+lvcreate -L $SHARED_SIZE -n $LV_SHARED $VG_NAME
+lvcreate -L $LUKS_SIZE -n $LV_LUKS $VG_NAME
+
+# Formatage des partitions
+mkfs.fat -F32 $EFI_PARTITION
+mkfs.ext4 /dev/$VG_NAME/$LV_ROOT
+mkfs.ext4 /dev/$VG_NAME/$LV_HOME
+mkfs.ext4 /dev/$VG_NAME/$LV_VIRTUALBOX
+mkfs.ext4 /dev/$VG_NAME/$LV_SHARED
+mkswap /dev/$VG_NAME/$LV_SWAP
+swapon /dev/$VG_NAME/$LV_SWAP
+
+# Montage des partitions
+mount /dev/$VG_NAME/$LV_ROOT /mnt
+mkdir -p /mnt/boot
+mount $EFI_PARTITION /mnt/boot
+mkdir -p /mnt/home
+mount /dev/$VG_NAME/$LV_HOME /mnt/home
+mkdir -p /mnt/virtualbox
+mount /dev/$VG_NAME/$LV_VIRTUALBOX /mnt/virtualbox
+mkdir -p /mnt/shared
+mount /dev/$VG_NAME/$LV_SHARED /mnt/shared
+
+# Installation d'Arch Linux
+pacstrap /mnt base linux linux-firmware lvm2 vim networkmanager grub efibootmgr
+
+# Génération du fichier fstab
+genfstab -U /mnt >> /mnt/etc/fstab
+
+# Configuration du système
+arch-chroot /mnt ln -sf /usr/share/zoneinfo/Europe/Paris /etc/localtime
+arch-chroot /mnt hwclock --systohc
+echo "fr_FR.UTF-8 UTF-8" >> /mnt/etc/locale.gen
+arch-chroot /mnt locale-gen
+echo "LANG=fr_FR.UTF-8" > /mnt/etc/locale.conf
+echo "$HOSTNAME" > /mnt/etc/hostname
+echo "127.0.0.1 localhost" >> /mnt/etc/hosts
+echo "::1       localhost" >> /mnt/etc/hosts
+echo "127.0.1.1 $HOSTNAME.localdomain $HOSTNAME" >> /mnt/etc/hosts
+
+# Configuration du bootloader
+arch-chroot /mnt grub-install --target=x86_64-efi --efi-directory=/boot --bootloader-id=GRUB
+arch-chroot /mnt grub-mkconfig -o /boot/grub/grub.cfg
+
+# Configuration des utilisateurs
+arch-chroot /mnt useradd -m -G wheel -s /bin/bash $USER1
+arch-chroot /mnt useradd -m -s /bin/bash $USER2
+echo "$USER1:$PASSWORD" | arch-chroot /mnt chpasswd
+echo "$USER2:$PASSWORD" | arch-chroot /mnt chpasswd
+echo "%wheel ALL=(ALL) ALL" >> /mnt/etc/sudoers
+
+# Installation des outils supplémentaires
+arch-chroot /mnt pacman -S --noconfirm virtualbox hyprland firefox gcc vim
+
+# Configuration de Hyprland (optionnel)
+mkdir -p /mnt/home/$USER1/.config/hypr
+echo "exec Hyprland" > /mnt/home/$USER1/.config/hypr/hyprland.conf
+
+# Configuration du volume chiffré LUKS
+echo -n "$PASSWORD" | cryptsetup luksFormat /dev/$VG_NAME/$LV_LUKS -
+echo -n "$PASSWORD" | cryptsetup open /dev/$VG_NAME/$LV_LUKS cryptluks -
+mkfs.ext4 /dev/mapper/cryptluks
+
+# Fin de l'installation
+umount -R /mnt
+swapoff -a
+echo "Installation terminée ! Redémarrez la machine."
