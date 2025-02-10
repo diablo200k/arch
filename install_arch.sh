@@ -1,9 +1,9 @@
 #!/bin/bash
 set -e
 
-############################################
+#################################################
 # Variables
-############################################
+#################################################
 DISK="/dev/sda"
 HOSTNAME="archbox"
 USER1="colleague"
@@ -23,7 +23,7 @@ LV_VIRTUALBOX="lv_virtualbox"
 LV_SHARED="lv_shared"
 LV_LUKS="lv_luks"
 
-# Tailles (adaptées pour un disque de 80Go)
+# Tailles (adaptées pour un disque de 80G)
 ROOT_SIZE="30G"
 SWAP_SIZE="2G"
 HOME_SIZE="15G"
@@ -31,51 +31,52 @@ VIRTUALBOX_SIZE="10G"
 SHARED_SIZE="5G"
 LUKS_SIZE="10G"
 
-############################################
-# Préparation et partitionnement
-############################################
-
+#################################################
+# 1. Préparation de l'environnement
+#################################################
 # Configuration du clavier
 loadkeys fr
 
-# Active la synchronisation de l’horloge
+# Activer la synchronisation de l'horloge
 timedatectl set-ntp true
 
-# Installation temporaire de Xorg (pour répondre à la demande de l’installateur)
-pacman -Sy --noconfirm xorg-server xorg-xinit
+# Mettre à jour le trousseau de clés (si nécessaire)
+pacman -Sy --noconfirm archlinux-keyring
 
-# Partitionnement avec parted
+#################################################
+# 2. Partitionnement du disque
+#################################################
 parted -s $DISK mklabel gpt
+
 # Partition EFI : de 1MiB à 513MiB
 parted -s $DISK mkpart primary fat32 1MiB 513MiB
 parted -s $DISK set 1 esp on
-# Partition pour le conteneur LUKS (et donc LVM) : de 513MiB jusqu’à la fin
+
+# Partition pour LUKS (et LVM) : de 513MiB à 100%
 parted -s $DISK mkpart primary ext4 513MiB 100%
 
-############################################
-# Mise en place du chiffrement et de LVM
-############################################
-
-# Chiffrement de la partition LUKS
-echo -n "$PASSWORD" | cryptsetup -q luksFormat $LUKS_PARTITION --key-file -
+#################################################
+# 3. Chiffrement LUKS et configuration LVM
+#################################################
+# Chiffrer la partition dédiée
+echo -n "$PASSWORD" | cryptsetup luksFormat $LUKS_PARTITION --key-file -
 echo -n "$PASSWORD" | cryptsetup open $LUKS_PARTITION $LUKS_MAPPER --key-file -
 
-# Création du volume physique et du groupe LVM sur le container déchiffré
+# Création du volume physique et groupe LVM
 pvcreate /dev/mapper/$LUKS_MAPPER
 vgcreate $VG_NAME /dev/mapper/$LUKS_MAPPER
 
 # Création des volumes logiques
-lvcreate -L $ROOT_SIZE      -n $LV_ROOT       $VG_NAME
-lvcreate -L $SWAP_SIZE      -n $LV_SWAP       $VG_NAME
-lvcreate -L $HOME_SIZE      -n $LV_HOME       $VG_NAME
+lvcreate -L $ROOT_SIZE       -n $LV_ROOT       $VG_NAME
+lvcreate -L $SWAP_SIZE       -n $LV_SWAP       $VG_NAME
+lvcreate -L $HOME_SIZE       -n $LV_HOME       $VG_NAME
 lvcreate -L $VIRTUALBOX_SIZE -n $LV_VIRTUALBOX $VG_NAME
-lvcreate -L $SHARED_SIZE    -n $LV_SHARED     $VG_NAME
-lvcreate -L $LUKS_SIZE      -n $LV_LUKS       $VG_NAME
+lvcreate -L $SHARED_SIZE     -n $LV_SHARED     $VG_NAME
+lvcreate -L $LUKS_SIZE       -n $LV_LUKS       $VG_NAME
 
-############################################
-# Formatage et montage
-############################################
-
+#################################################
+# 4. Formatage des partitions et volumes logiques
+#################################################
 # Formatage de la partition EFI
 mkfs.fat -F32 $EFI_PARTITION
 
@@ -84,37 +85,54 @@ mkfs.ext4 /dev/$VG_NAME/$LV_ROOT
 mkfs.ext4 /dev/$VG_NAME/$LV_HOME
 mkfs.ext4 /dev/$VG_NAME/$LV_VIRTUALBOX
 mkfs.ext4 /dev/$VG_NAME/$LV_SHARED
+
+# Préparer la swap
 mkswap /dev/$VG_NAME/$LV_SWAP
 swapon /dev/$VG_NAME/$LV_SWAP
 
-# Montage des partitions dans /mnt
+#################################################
+# 5. Montage des partitions sur /mnt
+#################################################
+# Si /mnt est déjà monté (par exemple sur airootfs), le démonter
+if mountpoint -q /mnt; then
+    umount -R /mnt
+fi
+
+# Monter le volume logique racine sur /mnt
 mount /dev/$VG_NAME/$LV_ROOT /mnt
+
+# Monter la partition EFI
 mkdir -p /mnt/boot
 mount $EFI_PARTITION /mnt/boot
+
+# Monter les autres volumes logiques
 mkdir -p /mnt/home
 mount /dev/$VG_NAME/$LV_HOME /mnt/home
+
 mkdir -p /mnt/virtualbox
 mount /dev/$VG_NAME/$LV_VIRTUALBOX /mnt/virtualbox
+
 mkdir -p /mnt/shared
 mount /dev/$VG_NAME/$LV_SHARED /mnt/shared
 
-############################################
-# Installation de base avec pacstrap
-############################################
+# Vérification (optionnelle) – Vous devriez voir la taille correspondant au volume logique
+df -h /mnt
 
+#################################################
+# 6. Installation de base via pacstrap
+#################################################
 pacstrap /mnt base linux linux-firmware lvm2 cryptsetup vim networkmanager grub efibootmgr
 
 # Génération du fichier fstab
 genfstab -U /mnt >> /mnt/etc/fstab
 
-############################################
-# Configuration système dans le chroot
-############################################
-
+#################################################
+# 7. Configuration du système dans le chroot
+#################################################
 arch-chroot /mnt /bin/bash <<'EOF'
 set -e
 
-# Fuseau horaire et horloge
+# Configuration du fuseau horaire et de l'horloge
 ln -sf /usr/share/zoneinfo/Europe/Paris /etc/localtime
 hwclock --systohc
 
@@ -132,13 +150,13 @@ cat <<HOSTS_EOF >> /etc/hosts
 127.0.1.1   archbox.localdomain archbox
 HOSTS_EOF
 
-# Mise à jour de mkinitcpio pour inclure encrypt et lvm2
+# Mise à jour de mkinitcpio : ajout des hooks encrypt et lvm2
 sed -i 's/^HOOKS=.*/HOOKS=(base udev autodetect modconf block encrypt lvm2 filesystems keyboard fsck)/' /etc/mkinitcpio.conf
 mkinitcpio -P
 
 # Configuration de GRUB avec le paramètre cryptdevice
-UUID=\$(blkid -s UUID -o value /dev/sda2)
-sed -i 's/^GRUB_CMDLINE_LINUX=""/GRUB_CMDLINE_LINUX="cryptdevice=UUID=\$UUID:cryptlvm"/' /etc/default/grub
+UUID=$(blkid -s UUID -o value /dev/sda2)
+sed -i "s/^GRUB_CMDLINE_LINUX=\"\"/GRUB_CMDLINE_LINUX=\"cryptdevice=UUID=${UUID}:cryptlvm\"/" /etc/default/grub
 grub-install --target=x86_64-efi --efi-directory=/boot --bootloader-id=GRUB
 grub-mkconfig -o /boot/grub/grub.cfg
 
@@ -147,40 +165,37 @@ useradd -m -G wheel -s /bin/bash colleague
 useradd -m -s /bin/bash son
 echo "colleague:azerty123" | chpasswd
 echo "son:azerty123" | chpasswd
-
-# Autorisation pour le groupe wheel
 echo "%wheel ALL=(ALL) ALL" >> /etc/sudoers
 
-# Installation d'outils complémentaires
+# Installation d'outils supplémentaires
 pacman -Sy --noconfirm virtualbox hyprland firefox gcc vim
 
-# Configuration personnalisée de Hyprland pour l'utilisateur colleague
+# Configuration de Hyprland pour l'utilisateur colleague
 mkdir -p /home/colleague/.config/hypr
 echo "exec Hyprland" > /home/colleague/.config/hypr/hyprland.conf
 chown -R colleague:colleague /home/colleague/.config
 
-# Activation des services système
+# Activation des services
 systemctl enable NetworkManager
 systemctl enable vboxservice
 
-# Configuration d’un volume logique supplémentaire chiffré (10Go) destiné à être monté manuellement
-echo -n "azerty123" | cryptsetup -q luksFormat /dev/vg0/lv_luks --key-file -
+# Configuration d'un volume logique supplémentaire chiffré (10G) à monter manuellement
+echo -n "azerty123" | cryptsetup luksFormat /dev/vg0/lv_luks --key-file -
 echo -n "azerty123" | cryptsetup open /dev/vg0/lv_luks cryptluks --key-file -
 mkfs.ext4 /dev/mapper/cryptluks
 echo "cryptluks /dev/vg0/lv_luks none luks" >> /etc/crypttab
 
-# Correction du montage du dossier partagé : dans le système installé, il apparaît en /shared
-# (car /mnt devient la racine une fois chrooté)
+# Configuration du dossier partagé
+# Note : ici, le volume logique "shared" est monté sur /shared par l'utilisateur
 chown -R colleague:colleague /shared
 chown -R son:son /shared
 chmod 770 /shared
 
 EOF
 
-############################################
-# Fin de l'installation
-############################################
-
+#################################################
+# 8. Finalisation de l'installation
+#################################################
 umount -R /mnt
 swapoff -a
 
